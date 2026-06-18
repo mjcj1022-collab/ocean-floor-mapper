@@ -1,37 +1,32 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useSurveyStore } from './store/surveyStore';
-import { SonarCanvas } from './components/SonarCanvas';
-import { LayerPanel } from './components/LayerPanel';
-import { TargetPanel } from './components/TargetPanel';
-import { PipelineBar } from './components/PipelineBar';
-import { MetricsBar } from './components/MetricsBar';
-import type { Target, ViewMode } from './types';
-import './App.css';
+import { Sidebar } from './components/nav/Sidebar';
+import { Topbar } from './components/nav/Topbar';
+import { DashboardPage } from './pages/DashboardPage';
+import { SurveyPage } from './pages/SurveyPage';
+import { TargetsPage } from './pages/TargetsPage';
+import { PipelinePage, LayersPage, ExportPage, SettingsPage } from './pages/OtherPages';
+import type { Page } from './components/nav/Sidebar';
+import type { Target } from './types';
 
 const DEMO_TARGETS: Target[] = [
   { id: 'TGT-001', lat: 28.4612, lon: -92.8201, depth_m: 1240, intensity: 0.94,
     shadow_length_px: 18, estimated_height_m: 5.2, footprint_px: 82,
-    confidence: 0.94, classification: 'high', notes: 'Hard metallic return' },
+    confidence: 0.94, classification: 'high', notes: 'Hard metallic return — elongated profile consistent with vessel wreck debris' },
   { id: 'TGT-002', lat: 28.4489, lon: -92.8034, depth_m: 980, intensity: 0.72,
     shadow_length_px: 9, estimated_height_m: 2.6, footprint_px: 34,
-    confidence: 0.67, classification: 'medium', notes: 'Possible wreck debris' },
+    confidence: 0.67, classification: 'medium', notes: 'Possible wreck debris or fishing gear entanglement' },
   { id: 'TGT-003', lat: 28.4401, lon: -92.8412, depth_m: 1580, intensity: 0.55,
     shadow_length_px: 24, estimated_height_m: 7.0, footprint_px: 140,
-    confidence: 0.41, classification: 'low', notes: 'Sediment mound' },
+    confidence: 0.41, classification: 'low', notes: 'Sediment mound — likely geological feature' },
   { id: 'TGT-004', lat: 28.4681, lon: -92.7991, depth_m: 760, intensity: 0.88,
     shadow_length_px: 12, estimated_height_m: 3.5, footprint_px: 28,
-    confidence: 0.88, classification: 'high', notes: 'Metallic return, elongated' },
-];
-
-const VIEW_MODES: Array<{ key: ViewMode; icon: string; label: string }> = [
-  { key: 'sonar',   icon: '≋', label: 'Sonar' },
-  { key: '3d',      icon: '⬡', label: '3D' },
-  { key: 'heatmap', icon: '◈', label: 'Heatmap' },
-  { key: 'contour', icon: '≣', label: 'Contours' },
+    confidence: 0.88, classification: 'high', notes: 'Strong metallic return — possible cannon or anchor' },
 ];
 
 export default function App() {
-  const { setTargets, mapView, setViewMode, setSession } = useSurveyStore();
+  const [page, setPage] = useState<Page>('dashboard');
+  const { setTargets, setSession, setMetrics, metrics } = useSurveyStore();
 
   useEffect(() => {
     setTargets(DEMO_TARGETS);
@@ -47,56 +42,43 @@ export default function App() {
       targets_count: DEMO_TARGETS.length,
       outputs: {},
     });
+
+    // Simulate live metric ticks
+    const interval = setInterval(() => {
+      setMetrics({
+        depth_current_m: 760 + Math.round(Math.sin(Date.now() / 3000) * 150),
+        elapsed_seconds: Math.floor((Date.now() - Date.now() % 1000) / 1000) % 3600,
+        pings_recorded: 8432 + Math.floor((Date.now() / 1000) % 1000),
+      });
+    }, 1000);
+    return () => clearInterval(interval);
   }, []);
 
+  const coords = {
+    lat: '28.4521°N',
+    lon: '92.8374°W',
+    depth: metrics.depth_current_m,
+  };
+
+  const PAGE_MAP: Record<Page, React.ReactNode> = {
+    dashboard: <DashboardPage />,
+    survey:    <SurveyPage />,
+    targets:   <TargetsPage />,
+    pipeline:  <PipelinePage />,
+    layers:    <LayersPage />,
+    export:    <ExportPage />,
+    settings:  <SettingsPage />,
+  };
+
   return (
-    <div className="app">
-      <header className="topbar">
-        <div className="topbar-left">
-          <div className="status-dot" />
-          <div>
-            <div className="topbar-title">Ocean Floor Mapper</div>
-            <div className="topbar-sub">Gulf of Mexico Block 42 · Active Pass 3/8</div>
-          </div>
-        </div>
-        <div className="view-switcher">
-          {VIEW_MODES.map((m) => (
-            <button
-              key={m.key}
-              className={`view-btn ${mapView.mode === m.key ? 'view-btn-active' : ''}`}
-              onClick={() => setViewMode(m.key)}
-              title={m.label}
-            >
-              {m.icon} {m.label}
-            </button>
-          ))}
-        </div>
-        <div className="coord-display">
-          <span>LAT 28.4521°N</span>
-          <span>LON 92.8374°W</span>
-        </div>
-      </header>
-
-      <MetricsBar />
-
-      <div className="main-layout">
-        <aside className="side-panel">
-          <LayerPanel />
-        </aside>
-        <main className="map-area">
-          <SonarCanvas />
-          <div className="legend">
-            <div className="legend-top">0 m</div>
-            <div className="legend-gradient" />
-            <div className="legend-bottom">4500 m</div>
-          </div>
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--sea-900)' }}>
+      <Sidebar active={page} onChange={setPage} />
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+        <Topbar page={page} coords={coords} />
+        <main style={{ flex: 1, overflow: 'hidden', background: 'var(--sea-800)' }}>
+          {PAGE_MAP[page]}
         </main>
-        <aside className="side-panel">
-          <TargetPanel />
-        </aside>
       </div>
-
-      <PipelineBar />
     </div>
   );
 }
