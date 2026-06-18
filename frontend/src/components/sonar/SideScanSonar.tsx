@@ -63,8 +63,11 @@ export function SideScanSonar({ width=900, height=260, rangeM=200, freqKhz=100, 
   const [cursor,setCursor]=useState<{x:number;info:string}|null>(null);
   const [markStart,setMarkStart]=useState<{x:number;y:number}|null>(null);
   const [markEnd,setMarkEnd]=useState<{x:number;y:number}|null>(null);
+  const [hoveredTargetId,setHoveredTargetId]=useState<string|null>(null);
+  // Track pixel positions of targets for HTML overlay positioning
+  const [targetPixels,setTargetPixels]=useState<Record<string,{px:number;py:number}>>({});
 
-  const { targets, selectedTargetId, selectTarget, addTarget, measureMode, setMeasureMode, addMeasurement } = useSurveyStore();
+  const { targets, selectedTargetId, selectTarget, addTarget, setTargets: _setTargets, removeTarget, measureMode, setMeasureMode, addMeasurement } = useSurveyStore();
 
   useEffect(()=>{
     const c=canvasRef.current; if(!c)return;
@@ -135,11 +138,29 @@ export function SideScanSonar({ width=900, height=260, rangeM=200, freqKhz=100, 
 
   const handleMouseMove=(e:React.MouseEvent<HTMLCanvasElement>)=>{
     const c=canvasRef.current!;const rect=c.getBoundingClientRect();
-    const x=(e.clientX-rect.left)*(c.width/rect.width);
+    const mx=(e.clientX-rect.left)*(c.width/rect.width);
+    const my=(e.clientY-rect.top)*(c.height/rect.height);
+    const W=c.width,H=c.height;
+    const x=mx;
     const half=c.width/2;const dist=Math.round(Math.abs(x-half)/half*rangeM);
     const side=x<half?'PORT':'STBD';
     setCursor({x:e.clientX-rect.left,info:`${side} ${dist} m`});
-    if(measureMode!=='none'&&markStart)setMarkEnd({x:(e.clientX-rect.left)*(c.width/rect.width),y:(e.clientY-rect.top)*(c.height/rect.height)});
+    if(measureMode!=='none'&&markStart)setMarkEnd({x:mx,y:my});
+
+    // Detect which target is hovered — update HTML overlay positions
+    const newPixels:Record<string,{px:number;py:number}>={}; 
+    let hoveredId:string|null=null;
+    for(const t of targets){
+      const pos=t.pixel_x!=null?{x:t.pixel_x*W,y:t.pixel_y!*H}:(DEMO_TGT_PX[t.id]?{x:DEMO_TGT_PX[t.id].x*W,y:DEMO_TGT_PX[t.id].y*H}:null);
+      if(!pos)continue;
+      // Convert canvas px → CSS px for overlay
+      const cssX=(pos.x/c.width)*rect.width;
+      const cssY=(pos.y/c.height)*rect.height;
+      newPixels[t.id]={px:cssX,py:cssY};
+      if(Math.hypot(mx-pos.x,my-pos.y)<22)hoveredId=t.id;
+    }
+    setTargetPixels(newPixels);
+    setHoveredTargetId(hoveredId);
   };
 
   const handleClick=(e:React.MouseEvent<HTMLCanvasElement>)=>{
@@ -186,17 +207,72 @@ export function SideScanSonar({ width=900, height=260, rangeM=200, freqKhz=100, 
     }
   };
 
-  const cursor_style = measureMode!=='none' ? 'crosshair' : 'pointer';
+  const cursor_style = measureMode!=='none' ? 'crosshair' : hoveredTargetId ? 'default' : 'pointer';
 
   return (
     <div style={{ position:'relative', background:'#000', overflow:'hidden' }}>
       <canvas ref={canvasRef} width={width} height={height}
         style={{ display:'block', width:'100%', height, cursor:cursor_style }}
-        onMouseMove={handleMouseMove} onMouseLeave={()=>setCursor(null)} onClick={handleClick} />
-      {cursor&&<div style={{ position:'absolute', top:6, left:cursor.x+10, background:'rgba(0,0,0,0.8)', color:'var(--green)', fontSize:10, fontFamily:'var(--font-mono)', padding:'2px 7px', borderRadius:3, pointerEvents:'none', whiteSpace:'nowrap' }}>{cursor.info}</div>}
+        onMouseMove={handleMouseMove}
+        onMouseLeave={()=>{ setCursor(null); setHoveredTargetId(null); }}
+        onClick={handleClick} />
+
+      {/* Cursor distance readout */}
+      {cursor && !hoveredTargetId && (
+        <div style={{ position:'absolute', top:6, left:cursor.x+10, background:'rgba(0,0,0,0.8)', color:'var(--green)', fontSize:10, fontFamily:'var(--font-mono)', padding:'2px 7px', borderRadius:3, pointerEvents:'none', whiteSpace:'nowrap' }}>{cursor.info}</div>
+      )}
+
+      {/* Delete X buttons — one per target, shown on hover */}
+      {showTargets && !historical && targets.map(t => {
+        const pos = targetPixels[t.id];
+        if (!pos) return null;
+        const isHovered = hoveredTargetId === t.id;
+        const isSelected = selectedTargetId === t.id;
+        if (!isHovered && !isSelected) return null;
+        const col = t.classification==='high' ? '#e05050' : t.classification==='medium' ? '#f0a500' : '#00c896';
+        return (
+          <button
+            key={t.id}
+            onClick={(e) => { e.stopPropagation(); removeTarget(t.id); }}
+            onMouseEnter={() => setHoveredTargetId(t.id)}
+            title={`Delete ${t.id}`}
+            style={{
+              position:'absolute',
+              left: pos.px + 14,
+              top:  pos.py - 20,
+              width: 18, height: 18,
+              borderRadius: '50%',
+              background: 'rgba(0,0,0,0.85)',
+              border: `1.5px solid ${col}`,
+              color: col,
+              fontSize: 11,
+              fontWeight: 700,
+              lineHeight: '16px',
+              textAlign: 'center',
+              cursor: 'pointer',
+              zIndex: 20,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              transition: 'all 0.12s',
+              boxShadow: `0 0 6px ${col}60`,
+            }}
+          >
+            ✕
+          </button>
+        );
+      })}
+
+      {/* Port / starboard labels */}
       <div style={{ position:'absolute', top:4, left:8, fontSize:9, fontFamily:'var(--font-mono)', color:'rgba(0,200,150,0.6)', pointerEvents:'none' }}>◀ PORT</div>
       <div style={{ position:'absolute', top:4, right:8, fontSize:9, fontFamily:'var(--font-mono)', color:'rgba(0,200,150,0.6)', pointerEvents:'none' }}>STBD ▶</div>
-      {measureMode!=='none'&&<div style={{ position:'absolute', bottom:6, left:'50%', transform:'translateX(-50%)', background:'rgba(240,165,0,0.9)', color:'#000', fontSize:10, fontWeight:700, padding:'3px 10px', borderRadius:10, pointerEvents:'none' }}>📏 {measureMode.toUpperCase()} — click to set point {markStart?'2':'1'}</div>}
+
+      {/* Measurement mode hint */}
+      {measureMode!=='none' && (
+        <div style={{ position:'absolute', bottom:6, left:'50%', transform:'translateX(-50%)', background:'rgba(240,165,0,0.9)', color:'#000', fontSize:10, fontWeight:700, padding:'3px 10px', borderRadius:10, pointerEvents:'none' }}>
+          📏 {measureMode.toUpperCase()} — click to set point {markStart ? '2' : '1'}
+        </div>
+      )}
     </div>
   );
 }

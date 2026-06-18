@@ -11,6 +11,7 @@ interface SurveyStore {
   setTargets: (t: Target[]) => void;
   addTarget: (t: Target) => void;
   updateTarget: (id: string, patch: Partial<Target>) => void;
+  removeTarget: (id: string) => void;
   selectTarget: (id: string | null) => void;
 
   // Map
@@ -101,6 +102,7 @@ export const useSurveyStore = create<SurveyStore>((set) => ({
   setTargets: (targets) => set({ targets }),
   addTarget: (t) => set((s) => ({ targets: [...s.targets, t] })),
   updateTarget: (id, patch) => set((s) => ({ targets: s.targets.map(t => t.id === id ? { ...t, ...patch } : t) })),
+  removeTarget: (id) => set((s) => ({ targets: s.targets.filter(t => t.id !== id), selectedTargetId: s.selectedTargetId === id ? null : s.selectedTargetId })),
   selectTarget: (id) => set({ selectedTargetId: id }),
 
   viewMode: 'sonar',
