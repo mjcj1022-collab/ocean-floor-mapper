@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 60" fill="none">
+  <circle cx="30" cy="30" r="22" stroke="#00c896" stroke-width="2.5"/>
+  <circle cx="30" cy="30" r="14" stroke="#00c896" stroke-width="1.5" opacity="0.6"/>
+  <path d="M30 8 L30 52M8 30 L52 30M14 14 L46 46M14 46 L46 14" stroke="#00c896" stroke-width="1" opacity="0.4"/>
+  <circle cx="30" cy="30" r="4" fill="#00c896"/>
+  <text x="62" y="24" font-family="Inter,sans-serif" font-size="15" font-weight="700" fill="#e8eef4" letter-spacing="-0.5">ODEN</text>
+  <text x="62" y="40" font-family="Inter,sans-serif" font-size="8" font-weight="400" fill="#4a6880" letter-spacing="2">OPTICAL DESIGN</text>
+  <text x="62" y="52" font-family="Inter,sans-serif" font-size="8" font-weight="400" fill="#4a6880" letter-spacing="1.2">ENGINEERING NETWORK</text>
+</svg>

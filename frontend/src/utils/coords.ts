@@ -1,0 +1,4 @@
+import type { CoordFormat } from '../types';
+export function formatLat(dd:number,fmt:CoordFormat):string{if(fmt==='DD')return`${Math.abs(dd).toFixed(6)}°${dd>=0?'N':'S'}`;if(fmt==='DMS'){const d=Math.floor(Math.abs(dd)),m=Math.floor((Math.abs(dd)-d)*60),s=((Math.abs(dd)-d)*60-m)*60;return`${d}° ${m}' ${s.toFixed(1)}" ${dd>=0?'N':'S'}`;}return`${dd.toFixed(4)}°N`;}
+export function formatLon(dd:number,fmt:CoordFormat):string{if(fmt==='DD')return`${Math.abs(dd).toFixed(6)}°${dd>=0?'E':'W'}`;if(fmt==='DMS'){const d=Math.floor(Math.abs(dd)),m=Math.floor((Math.abs(dd)-d)*60),s=((Math.abs(dd)-d)*60-m)*60;return`${d}° ${m}' ${s.toFixed(1)}" ${dd>=0?'E':'W'}`;}return`${Math.abs(dd).toFixed(4)}°W`;}
+export function shadowToHeight(shadowM:number,altM=30,grazDeg=30):number{return+((shadowM*Math.tan(grazDeg*Math.PI/180)*(altM/(altM+shadowM))).toFixed(2));}

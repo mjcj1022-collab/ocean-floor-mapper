@@ -1,274 +1,202 @@
-/**
- * SideScanSonar — horizontal waterfall display
- *
- * Simulates a towed side-scan sonar head producing a classic
- * "paper roll" waterfall image.  Each new scan line is painted
- * at the top and older lines scroll down, exactly like SonarWiz
- * or EdgeTech software.
- *
- * Layout (W × H canvas):
- *   Left half  = port  swath  (flipped, nadir at centre)
- *   Right half = starboard swath (nadir at centre)
- *   Centre     = nadir (vessel track) — bright line
- *   Colour     = intensity: dark=soft mud, bright=hard/metal
- */
-
 import { useEffect, useRef, useState } from 'react';
+import { useSurveyStore } from '../../store/surveyStore';
+import { classifyTarget } from '../../utils/aiClassify';
+import { shadowToHeight } from '../../utils/coords';
+import type { Target } from '../../types';
 
-interface Props {
-  width?: number;
-  height?: number;
-  rangeM?: number;          // total swath range metres (each side)
-  frequencyKhz?: number;
-  gainDb?: number;
-  running?: boolean;
-}
+interface Props { width?:number; height?:number; rangeM?:number; freqKhz?:number; gainDb?:number; running?:boolean; historical?:boolean; showTargets?:boolean; }
 
-// ─── Seafloor texture model ───────────────────────────────────────────────
+function seededRand(s:number){const x=Math.sin(s+1)*73856;return x-Math.floor(x);}
 
-function seededRand(s: number) {
-  const x = Math.sin(s + 1) * 73856.0932;
-  return x - Math.floor(x);
-}
-
-/** Generate one ping line (W pixels) of side-scan intensity 0-255 */
-function generatePingLine(
-  W: number,
-  pingIndex: number,
-  frequencyKhz: number,
-  gainDb: number,
-  rangeM: number,
-): Uint8ClampedArray {
-  const line = new Uint8ClampedArray(W);
-  const half = W / 2;
-  const gainFactor = (gainDb - 20) / 60;   // normalise gain 20-80dB → 0-1
-
-  for (let px = 0; px < W; px++) {
-    // Distance from nadir (centre) 0-1
-    const distFromNadir = Math.abs(px - half) / half;
-    // Slant range for TVG
-    const _slantM = distFromNadir * rangeM;  // used for future TVG curves
-    void _slantM;
-    // ── Spreading loss (TVG correction already applied) ───────────────
-    const spreading = Math.max(0, 1 - distFromNadir * 0.6);
-
-    // ── Seafloor texture ──────────────────────────────────────────────
-    // Slow-varying geological structure
-    const geoFreq = 0.008;
-    const geo = 0.5 + 0.35 * Math.sin(pingIndex * geoFreq + distFromNadir * 4.2)
-                     + 0.15 * Math.sin(pingIndex * geoFreq * 3.1 + distFromNadir * 9.7);
-
-    // Fine-grained backscatter noise (frequency-dependent)
-    const noiseScale = frequencyKhz / 100;
-    const noise = seededRand(px * 137.3 + pingIndex * 97.1 * noiseScale) * 0.25;
-
-    // ── Hard targets — metallic bright returns ────────────────────────
-    const targetReturns = [
-      { pingC: 320, sampleC: 0.42, r: 0.02, str: 1.0 },   // TGT-001
-      { pingC: 520, sampleC: 0.61, r: 0.015, str: 0.8 },  // TGT-002
-      { pingC: 680, sampleC: 0.28, r: 0.025, str: 0.5 },  // TGT-003
-      { pingC: 210, sampleC: 0.73, r: 0.018, str: 0.95 }, // TGT-004
+function generatePingLine(W:number,ping:number,freqKhz:number,gainDb:number,rangeM:number,historical:boolean):Uint8ClampedArray{
+  const line=new Uint8ClampedArray(W),half=W/2,gain=(gainDb-20)/60;
+  const historicalOffset=historical?180:0;
+  for(let px=0;px<W;px++){
+    const dist=Math.abs(px-half)/half;void(rangeM);
+    const spread=Math.max(0,1-dist*0.55);
+    const geo=0.5+0.32*Math.sin((ping+historicalOffset)*0.009+dist*4.1)+0.14*Math.sin((ping+historicalOffset)*0.028+dist*9.4)+0.06*Math.sin((ping+historicalOffset)*0.055+dist*18);
+    const noise=seededRand(px*137+(ping+historicalOffset)*97*(freqKhz/100))*0.2;
+    const TARGETS=[
+      {pc:320,sc:0.42,r:0.022,str:1.0,shad:0.06},
+      {pc:520,sc:0.61,r:0.016,str:0.75,shad:0.04},
+      {pc:680,sc:0.28,r:0.026,str:0.45,shad:0.07},
+      {pc:210,sc:0.73,r:0.018,str:0.92,shad:0.05},
     ];
-    let targetBoost = 0;
-    const normPx = px / W;
-    for (const t of targetReturns) {
-      const dp = (pingIndex % 800 - t.pingC) / 800;
-      const ds = normPx - t.sampleC;
-      const dist2 = dp * dp * 0.3 + ds * ds;
-      if (dist2 < t.r * t.r) {
-        targetBoost = Math.max(targetBoost, t.str * (1 - dist2 / (t.r * t.r)));
-      }
-      // Acoustic shadow — dark zone behind target
-      if (dp > 0 && dp < 0.04 && Math.abs(ds - t.sampleC * 0.05) < 0.03) {
-        targetBoost = Math.min(targetBoost, -0.4);
-      }
+    let tgt=0; const np=px/W;
+    for(const t of TARGETS){
+      const dp=(ping%800-t.pc)/800,ds=np-t.sc,d2=dp*dp*0.25+ds*ds;
+      if(d2<t.r*t.r)tgt=Math.max(tgt,t.str*(1-d2/(t.r*t.r)));
+      if(!historical&&dp>0&&dp<0.045&&Math.abs(ds-t.sc*0.06)<0.032)tgt=Math.min(tgt,-0.35);
     }
-
-    // ── Nadir band — specular reflection from directly below ──────────
-    const nadirWidth = 0.04;
-    const nadir = distFromNadir < nadirWidth
-      ? (1 - distFromNadir / nadirWidth) * 0.8
-      : 0;
-
-    // ── Combine ───────────────────────────────────────────────────────
-    let intensity = (geo * spreading + noise + nadir + gainFactor * 0.2 + targetBoost);
-    intensity = Math.max(0, Math.min(1, intensity));
-
-    line[px] = Math.round(intensity * 255);
+    const nadir=dist<0.035?(1-dist/0.035)*0.75:0;
+    let v=Math.max(0,Math.min(1,(geo*spread+noise+nadir+gain*0.18+tgt)));
+    if(historical)v=v*0.85;
+    line[px]=Math.round(v*255);
   }
   return line;
 }
 
-/** Map intensity 0-255 to sonar colour (dark background, bright returns) */
-function sonarRGB(intensity: number): [number, number, number] {
-  // Classic side-scan palette: dark blue-grey → mid blue → bright cyan/white
-  const t = intensity / 255;
-  if (t < 0.15) return [Math.round(t / 0.15 * 8), Math.round(t / 0.15 * 12), Math.round(t / 0.15 * 20)];
-  if (t < 0.4)  {
-    const s = (t - 0.15) / 0.25;
-    return [Math.round(s * 15), Math.round(12 + s * 40), Math.round(20 + s * 80)];
+function sonarRGB(i:number,historical:boolean):[number,number,number]{
+  const t=i/255;
+  if(historical){
+    if(t<0.1)return[0,Math.round(t/0.1*5),Math.round(t/0.1*12)];
+    if(t<0.4){const s=(t-0.1)/0.3;return[Math.round(s*15),Math.round(5+s*30),Math.round(12+s*60)];}
+    if(t<0.7){const s=(t-0.4)/0.3;return[Math.round(15+s*40),Math.round(35+s*60),Math.round(72+s*50)];}
+    const s=(t-0.7)/0.3;return[Math.round(55+s*80),Math.round(95+s*80),Math.round(122+s*60)];
   }
-  if (t < 0.7)  {
-    const s = (t - 0.4) / 0.3;
-    return [Math.round(15 + s * 60), Math.round(52 + s * 100), Math.round(100 + s * 80)];
-  }
-  // Very bright return — white/cyan highlight
-  const s = (t - 0.7) / 0.3;
-  return [
-    Math.round(75 + s * 180),
-    Math.round(152 + s * 103),
-    Math.round(180 + s * 75),
-  ];
+  if(t<0.12)return[0,Math.round(t/0.12*8),Math.round(t/0.12*18)];
+  if(t<0.38){const s=(t-0.12)/0.26;return[Math.round(s*12),Math.round(8+s*38),Math.round(18+s*80)];}
+  if(t<0.68){const s=(t-0.38)/0.3;return[Math.round(12+s*55),Math.round(46+s*110),Math.round(98+s*100)];}
+  const s=(t-0.68)/0.32;return[Math.round(67+s*180),Math.round(156+s*99),Math.round(198+s*57)];
 }
 
-// ─── Component ─────────────────────────────────────────────────────────────
+const DEMO_TGT_PX: Record<string,{x:number;y:number}> = {
+  'TGT-001':{x:0.42,y:0.22},'TGT-002':{x:0.61,y:0.38},'TGT-003':{x:0.28,y:0.55},'TGT-004':{x:0.73,y:0.15},
+};
 
-export function SideScanSonar({
-  width = 680,
-  height = 280,
-  rangeM = 200,
-  frequencyKhz = 100,
-  gainDb = 40,
-  running = true,
-}: Props) {
-  const canvasRef  = useRef<HTMLCanvasElement>(null);
-  const bufferRef  = useRef<Uint8ClampedArray | null>(null);
-  const pingRef    = useRef(0);
-  const rafRef     = useRef(0);
-  const lastTickRef = useRef(0);
+export function SideScanSonar({ width=900, height=260, rangeM=200, freqKhz=100, gainDb=40, running=true, historical=false, showTargets=true }: Props) {
+  const canvasRef=useRef<HTMLCanvasElement>(null);
+  const bufRef=useRef<Uint8ClampedArray|null>(null);
+  const pingRef=useRef(0);
+  const rafRef=useRef(0);
+  const lastRef=useRef(0);
+  const [cursor,setCursor]=useState<{x:number;info:string}|null>(null);
+  const [markStart,setMarkStart]=useState<{x:number;y:number}|null>(null);
+  const [markEnd,setMarkEnd]=useState<{x:number;y:number}|null>(null);
 
-  // Labels
-  const [cursorInfo, setCursorInfo] = useState<{ x: number; dist: string } | null>(null);
+  const { targets, selectedTargetId, selectTarget, addTarget, measureMode, setMeasureMode, addMeasurement } = useSurveyStore();
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d')!;
-    const W = canvas.width, H = canvas.height;
+  useEffect(()=>{
+    const c=canvasRef.current; if(!c)return;
+    const ctx=c.getContext('2d')!;
+    const W=c.width,H=c.height;
+    if(!bufRef.current||bufRef.current.length!==W*H*4)bufRef.current=new Uint8ClampedArray(W*H*4);
 
-    // Initialise pixel buffer (RGBA)
-    if (!bufferRef.current || bufferRef.current.length !== W * H * 4) {
-      bufferRef.current = new Uint8ClampedArray(W * H * 4);
-      bufferRef.current.fill(0);
+    function tick(ts:number){
+      if(!running){rafRef.current=requestAnimationFrame(tick);return;}
+      if(ts-lastRef.current<85){rafRef.current=requestAnimationFrame(tick);return;}
+      lastRef.current=ts;
+      const buf=bufRef.current!;
+      const line=generatePingLine(W,pingRef.current++,freqKhz,gainDb,rangeM,historical);
+      buf.copyWithin(W*4,0,(H-1)*W*4);
+      for(let px=0;px<W;px++){const i=px*4;const[r,g,b]=sonarRGB(line[px],historical);buf[i]=r;buf[i+1]=g;buf[i+2]=b;buf[i+3]=255;}
+      ctx.putImageData(new ImageData(new Uint8ClampedArray(buf),W,H),0,0);
+      // Overlay
+      const half=W/2;
+      ctx.strokeStyle='rgba(0,200,150,0.45)';ctx.lineWidth=1;ctx.setLineDash([4,4]);
+      ctx.beginPath();ctx.moveTo(half,0);ctx.lineTo(half,H);ctx.stroke();ctx.setLineDash([]);
+      ctx.fillStyle='rgba(255,255,255,0.18)';ctx.font='9px var(--font-mono)';ctx.textAlign='center';
+      for(let m=50;m<rangeM;m+=50){const pxO=m/rangeM*half;ctx.fillRect(half-pxO,0,0.5,5);ctx.fillText(`${m}`,half-pxO,14);ctx.fillRect(half+pxO,0,0.5,5);ctx.fillText(`${m}`,half+pxO,14);}
+      // Active marker
+      ctx.fillStyle='rgba(0,200,150,0.5)';ctx.fillRect(W-36,0,36,2);
+      // Target overlays
+      if(showTargets&&!historical){
+        targets.forEach(t=>{
+          const pos=t.pixel_x!=null?{x:t.pixel_x*W,y:t.pixel_y!*H}:(DEMO_TGT_PX[t.id]?{x:DEMO_TGT_PX[t.id].x*W,y:DEMO_TGT_PX[t.id].y*H}:null);
+          if(!pos)return;
+          const sel=t.id===selectedTargetId,r=sel?14:10;
+          const col=t.classification==='high'?'#e05050':t.classification==='medium'?'#f0a500':'#00c896';
+          const pulse=0.5+0.5*Math.sin(pingRef.current*0.06+targets.indexOf(t)*1.3);
+          ctx.beginPath();ctx.arc(pos.x,pos.y,r+6*pulse,0,Math.PI*2);ctx.strokeStyle=col+'40';ctx.lineWidth=1;ctx.stroke();
+          ctx.beginPath();ctx.arc(pos.x,pos.y,r,0,Math.PI*2);ctx.strokeStyle=col;ctx.lineWidth=sel?2.5:1.5;ctx.fillStyle=col+'25';ctx.fill();ctx.stroke();
+          const cs=r+5;ctx.strokeStyle=col;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(pos.x-cs,pos.y);ctx.lineTo(pos.x+cs,pos.y);ctx.moveTo(pos.x,pos.y-cs);ctx.lineTo(pos.x,pos.y+cs);ctx.stroke();
+          // Dimension label
+          if(t.dims.length_m){
+            ctx.fillStyle='rgba(0,0,0,0.7)';ctx.fillRect(pos.x+r+3,pos.y-20,70,34);
+            ctx.fillStyle=col;ctx.font='bold 10px var(--font-mono)';ctx.textAlign='left';
+            ctx.fillText(t.id,pos.x+r+6,pos.y-8);
+            ctx.fillStyle='rgba(255,255,255,0.8)';ctx.font='9px var(--font-mono)';
+            ctx.fillText(`L:${t.dims.length_m}m H:${t.dims.height_m??'?'}m`,pos.x+r+6,pos.y+4);
+            if(t.ai_label)ctx.fillText(t.ai_label.slice(0,16),pos.x+r+6,pos.y+14);
+          } else {
+            ctx.fillStyle=col;ctx.font='9px var(--font-mono)';ctx.textAlign='left';ctx.fillText(t.id,pos.x+r+3,pos.y-3);
+            if(t.ai_label)ctx.fillText(t.ai_label.slice(0,12),pos.x+r+3,pos.y+8);
+          }
+          if(sel){ctx.setLineDash([3,3]);ctx.beginPath();ctx.arc(pos.x,pos.y,r+14+4*pulse,0,Math.PI*2);ctx.strokeStyle=col;ctx.lineWidth=1.5;ctx.stroke();ctx.setLineDash([]);}
+        });
+      }
+      // Measurement line
+      if(markStart&&markEnd){
+        ctx.strokeStyle='#f0a500';ctx.lineWidth=2;ctx.setLineDash([5,3]);
+        ctx.beginPath();ctx.moveTo(markStart.x,markStart.y);ctx.lineTo(markEnd.x,markEnd.y);ctx.stroke();
+        ctx.setLineDash([]);
+        const dist=Math.hypot(markEnd.x-markStart.x,markEnd.y-markStart.y)/W*rangeM*2;
+        ctx.fillStyle='rgba(0,0,0,0.8)';ctx.fillRect((markStart.x+markEnd.x)/2-30,(markStart.y+markEnd.y)/2-10,60,18);
+        ctx.fillStyle='#f0a500';ctx.font='bold 10px var(--font-mono)';ctx.textAlign='center';
+        ctx.fillText(`${dist.toFixed(1)} m`,(markStart.x+markEnd.x)/2,(markStart.y+markEnd.y)/2+3);
+        ctx.fillStyle='#f0a500';ctx.beginPath();ctx.arc(markStart.x,markStart.y,3,0,Math.PI*2);ctx.fill();
+        ctx.beginPath();ctx.arc(markEnd.x,markEnd.y,3,0,Math.PI*2);ctx.fill();
+      }
+      rafRef.current=requestAnimationFrame(tick);
+    }
+    rafRef.current=requestAnimationFrame(tick);
+    return()=>cancelAnimationFrame(rafRef.current);
+  },[running,freqKhz,gainDb,rangeM,historical,targets,selectedTargetId,markStart,markEnd,showTargets]);
+
+  const handleMouseMove=(e:React.MouseEvent<HTMLCanvasElement>)=>{
+    const c=canvasRef.current!;const rect=c.getBoundingClientRect();
+    const x=(e.clientX-rect.left)*(c.width/rect.width);
+    const half=c.width/2;const dist=Math.round(Math.abs(x-half)/half*rangeM);
+    const side=x<half?'PORT':'STBD';
+    setCursor({x:e.clientX-rect.left,info:`${side} ${dist} m`});
+    if(measureMode!=='none'&&markStart)setMarkEnd({x:(e.clientX-rect.left)*(c.width/rect.width),y:(e.clientY-rect.top)*(c.height/rect.height)});
+  };
+
+  const handleClick=(e:React.MouseEvent<HTMLCanvasElement>)=>{
+    const c=canvasRef.current!;const rect=c.getBoundingClientRect();
+    const mx=(e.clientX-rect.left)*(c.width/rect.width);
+    const my=(e.clientY-rect.top)*(c.height/rect.height);
+    const W=c.width,H=c.height;
+
+    if(measureMode!=='none'){
+      if(!markStart){setMarkStart({x:mx,y:my});setMarkEnd(null);}
+      else{
+        const dist=+(Math.hypot(mx-markStart.x,my-markStart.y)/W*rangeM*2).toFixed(2);
+        addMeasurement({id:`M-${Date.now()}`,mode:measureMode,points:[markStart,{x:mx,y:my}],result:dist,unit:'m',label:`${measureMode}: ${dist} m`});
+        setMarkStart(null);setMarkEnd(null);setMeasureMode('none');
+      }
+      return;
     }
 
-    const PING_RATE_MS = 80;   // one new scan line every 80ms ≈ 12.5 Hz
-
-    function tick(ts: number) {
-      if (!running) { rafRef.current = requestAnimationFrame(tick); return; }
-      if (ts - lastTickRef.current < PING_RATE_MS) {
-        rafRef.current = requestAnimationFrame(tick);
-        return;
-      }
-      lastTickRef.current = ts;
-
-      const buf = bufferRef.current!;
-      const pingLine = generatePingLine(W, pingRef.current++, frequencyKhz, gainDb, rangeM);
-
-      // Scroll existing rows DOWN by one scan line (shift buffer up)
-      buf.copyWithin(W * 4, 0, (H - 1) * W * 4);
-
-      // Paint new ping line at the top (row 0)
-      for (let px = 0; px < W; px++) {
-        const i = px * 4;
-        const [r, g, b] = sonarRGB(pingLine[px]);
-        buf[i] = r; buf[i + 1] = g; buf[i + 2] = b; buf[i + 3] = 255;
-      }
-
-      // Commit to canvas
-      const imgData = new ImageData(new Uint8ClampedArray(buf), W, H);
-      ctx.putImageData(imgData, 0, 0);
-
-      // Draw overlay: nadir line + range scale ticks
-      drawOverlay(ctx, W, H, rangeM);
-
-      rafRef.current = requestAnimationFrame(tick);
+    // Hit-test targets
+    for(const t of targets){
+      const pos=t.pixel_x!=null?{x:t.pixel_x*W,y:t.pixel_y!*H}:(DEMO_TGT_PX[t.id]?{x:DEMO_TGT_PX[t.id].x*W,y:DEMO_TGT_PX[t.id].y*H}:null);
+      if(pos&&Math.hypot(mx-pos.x,my-pos.y)<18){selectTarget(t.id===selectedTargetId?null:t.id);return;}
     }
 
-    rafRef.current = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafRef.current);
-  }, [running, frequencyKhz, gainDb, rangeM]);
+    // Create new target on click
+    if(!historical){
+      const intensity=0.6+Math.random()*0.35;
+      const conf=0.4+Math.random()*0.55;
+      const {type,ai_label,ai_description}=classifyTarget(conf,intensity);
+      const shadowPx=Math.round(10+Math.random()*20);
+      const shadowM=+(shadowPx/W*rangeM*2).toFixed(1);
+      const height=shadowToHeight(shadowM);
+      const newT:Target={
+        id:`TGT-${String(targets.length+1).padStart(3,'0')}`,
+        lat:28.45+Math.random()*0.02,lon:-92.84+Math.random()*0.04,
+        depth_m:Math.round(600+Math.random()*1200),intensity,confidence:conf,
+        classification:conf>0.75?'high':conf>0.5?'medium':'low',
+        type,status:'OPEN',notes:'',
+        dims:{length_m:+(Math.random()*20+3).toFixed(1),width_m:+(Math.random()*6+1).toFixed(1),height_m:height,shadow_length_m:shadowM},
+        ai_label,ai_description,created_at:new Date().toISOString(),created_by:'MJ',
+        pixel_x:mx/W,pixel_y:my/H,manual:true,
+      };
+      addTarget(newT);selectTarget(newT.id);
+    }
+  };
 
-  function handleMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
-    const c = canvasRef.current!;
-    const rect = c.getBoundingClientRect();
-    const x = (e.clientX - rect.left) * (c.width / rect.width);
-    const half = c.width / 2;
-    const distM = Math.round(Math.abs(x - half) / half * rangeM);
-    const side = x < half ? 'PORT' : 'STBD';
-    setCursorInfo({ x: e.clientX - rect.left, dist: `${side} ${distM} m` });
-  }
+  const cursor_style = measureMode!=='none' ? 'crosshair' : 'pointer';
 
   return (
-    <div style={{ position: 'relative', background: '#000', borderRadius: 6, overflow: 'hidden' }}>
-      <canvas
-        ref={canvasRef}
-        width={width}
-        height={height}
-        style={{ display: 'block', width: '100%', height: height }}
-        onMouseMove={handleMouseMove}
-        onMouseLeave={() => setCursorInfo(null)}
-      />
-      {/* Cursor readout */}
-      {cursorInfo && (
-        <div style={{
-          position: 'absolute', top: 6, left: cursorInfo.x + 8,
-          background: 'rgba(0,0,0,0.75)', color: '#1db082',
-          fontSize: 10, fontFamily: 'monospace', padding: '2px 6px',
-          borderRadius: 3, pointerEvents: 'none', whiteSpace: 'nowrap',
-        }}>
-          {cursorInfo.dist}
-        </div>
-      )}
-      {/* Static port/starboard labels */}
-      <div style={labelStyle(true)}>◀ PORT</div>
-      <div style={labelStyle(false)}>STBD ▶</div>
+    <div style={{ position:'relative', background:'#000', overflow:'hidden' }}>
+      <canvas ref={canvasRef} width={width} height={height}
+        style={{ display:'block', width:'100%', height, cursor:cursor_style }}
+        onMouseMove={handleMouseMove} onMouseLeave={()=>setCursor(null)} onClick={handleClick} />
+      {cursor&&<div style={{ position:'absolute', top:6, left:cursor.x+10, background:'rgba(0,0,0,0.8)', color:'var(--green)', fontSize:10, fontFamily:'var(--font-mono)', padding:'2px 7px', borderRadius:3, pointerEvents:'none', whiteSpace:'nowrap' }}>{cursor.info}</div>}
+      <div style={{ position:'absolute', top:4, left:8, fontSize:9, fontFamily:'var(--font-mono)', color:'rgba(0,200,150,0.6)', pointerEvents:'none' }}>◀ PORT</div>
+      <div style={{ position:'absolute', top:4, right:8, fontSize:9, fontFamily:'var(--font-mono)', color:'rgba(0,200,150,0.6)', pointerEvents:'none' }}>STBD ▶</div>
+      {measureMode!=='none'&&<div style={{ position:'absolute', bottom:6, left:'50%', transform:'translateX(-50%)', background:'rgba(240,165,0,0.9)', color:'#000', fontSize:10, fontWeight:700, padding:'3px 10px', borderRadius:10, pointerEvents:'none' }}>📏 {measureMode.toUpperCase()} — click to set point {markStart?'2':'1'}</div>}
     </div>
   );
-}
-
-function labelStyle(isPort: boolean): React.CSSProperties {
-  return {
-    position: 'absolute', top: 6,
-    ...(isPort ? { left: 8 } : { right: 8 }),
-    fontSize: 10, fontFamily: 'monospace',
-    color: 'rgba(29,176,130,0.7)',
-    letterSpacing: '0.06em', pointerEvents: 'none',
-  };
-}
-
-function drawOverlay(
-  ctx: CanvasRenderingContext2D,
-  W: number, H: number,
-  rangeM: number,
-) {
-  const half = W / 2;
-
-  // Nadir centre line
-  ctx.strokeStyle = 'rgba(29,176,130,0.5)';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([4, 4]);
-  ctx.beginPath();
-  ctx.moveTo(half, 0); ctx.lineTo(half, H);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // Range tick marks every 50 m on both sides
-  const tickInterval = 50;
-  ctx.fillStyle = 'rgba(255,255,255,0.25)';
-  ctx.font = '9px monospace';
-  ctx.textAlign = 'center';
-  for (let m = tickInterval; m < rangeM; m += tickInterval) {
-    const pxOffset = (m / rangeM) * half;
-    // Port side (left of nadir)
-    ctx.fillRect(half - pxOffset, 0, 0.5, 6);
-    ctx.fillText(`${m}`, half - pxOffset, 16);
-    // Starboard side (right of nadir)
-    ctx.fillRect(half + pxOffset, 0, 0.5, 6);
-    ctx.fillText(`${m}`, half + pxOffset, 16);
-  }
-
-  // "Ping" flash indicator top-right
-  ctx.fillStyle = 'rgba(29,176,130,0.6)';
-  ctx.fillRect(W - 40, 0, 40, 2);
 }
