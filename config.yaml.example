@@ -1,0 +1,41 @@
+# Ocean Floor Mapper — Configuration Template
+# Copy to config.yaml and fill in your values. config.yaml is gitignored.
+
+arcgis:
+  install_path: "C:/Program Files/ArcGIS/Pro/bin/Python/envs/arcgispro-py3/python.exe"
+  license: "Advanced"           # Basic | Standard | Advanced
+  workspace: "./data/outputs/arcgis"
+
+qgis:
+  install_path: "C:/Program Files/QGIS 3.28/bin/qgis-ltr-bin.exe"
+  # On Linux: /usr/bin/qgis
+
+sonarwiz:
+  install_path: "C:/Program Files/SonarWiz/SonarWiz.exe"
+  script_dir: "./integrations/sonarwiz/scripts"
+
+hypack:
+  install_path: "C:/Program Files/HYPACK/HYPACK.exe"
+
+google_earth:
+  api_key: "YOUR_GOOGLE_MAPS_API_KEY"
+  kml_output_dir: "./data/outputs/kml"
+
+data:
+  raw: "./data/raw"
+  processed: "./data/processed"
+  outputs: "./data/outputs"
+
+survey:
+  vessel_name: "R/V Surveyor"
+  operator: "Your Name"
+  coordinate_system: "WGS84"
+  depth_unit: "meters"
+
+noaa:
+  wrecks_db_url: "https://nauticalcharts.noaa.gov/data/wrecks-and-obstructions.html"
+  bathymetry_api: "https://www.ncei.noaa.gov/maps/bathymetry/"
+
+logging:
+  level: "INFO"           # DEBUG | INFO | WARNING | ERROR
+  file: "./logs/mapper.log"
